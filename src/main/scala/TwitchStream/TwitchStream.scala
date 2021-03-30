@@ -6,7 +6,7 @@ object TwitchStream extends App {
 
   Stream Twitch Channel Chat to Spark DStream.
 
-  sbt run [channelName] [batchDuration]
+  sbt run [channelName] [batchDuration] [twitch_nickname] [twitch_oauth]
 
   ChannelName : #<ChannelName>
   BatchDuration: in seconds
@@ -27,8 +27,10 @@ object TwitchStream extends App {
   val channel = args(0)
   val batchDuration = args(1).toInt
   val language = args(2)
+  val twitch_nick = args(3)
+  val twitch_oauth = args(4)
 
-  val runner = new SparkRunner(channel, batchDuration, language)
+  val runner = new SparkRunner(channel, batchDuration, language, twitch_nick, twitch_oauth)
 
   runner.start()
 

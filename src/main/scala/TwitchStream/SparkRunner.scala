@@ -10,7 +10,12 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.streaming._
 
-class SparkRunner(TwitchChannel: String, BatchDuration: Int, language: String = "en") {
+class SparkRunner(
+                   TwitchChannel: String,
+                   BatchDuration: Int,
+                   language: String = "en",
+                   twitch_nick: String,
+                   twitch_oauth:String) {
 
   System.setProperty("hadoop.home.dir", "/d:/Hadoop/hadoop-3.2.1/")
 
@@ -78,7 +83,7 @@ class SparkRunner(TwitchChannel: String, BatchDuration: Int, language: String = 
     }
 
     // Init CustomReceiver from IRCBot
-    val customReceiverStream = ssc.receiverStream(new IRCBot(TwitchChannel))
+    val customReceiverStream = ssc.receiverStream(new IRCBot(TwitchChannel, twitch_nick, twitch_oauth))
 
     // Init temporary view for Redis
     spark.sql(

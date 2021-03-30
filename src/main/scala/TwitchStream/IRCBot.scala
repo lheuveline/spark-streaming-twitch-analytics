@@ -7,21 +7,20 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.streaming.receiver.Receiver
 
-class IRCBot(val channel: String) extends Receiver[String](StorageLevel.MEMORY_AND_DISK_2) with Logging {
+class IRCBot(val channel: String, val nick: String, val pass:String)
+  extends Receiver[String](StorageLevel.MEMORY_AND_DISK_2) with Logging {
 
   // The server to connect to and our details.
-  val server = "irc.chat.twitch.tv"
-  val nick = ""
-  val pass = ""
+  val server: String = "irc.chat.twitch.tv"
   var line: String = null
 
   @throws[Exception]
   def read(): Unit = {
 
     // Connect directly to the IRC server.
-    val socket = new Socket(server, 6667)
-    val writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream,"Cp1252"))
-    val reader = new BufferedReader(new InputStreamReader(socket.getInputStream))
+    val socket:Socket = new Socket(server, 6667)
+    val writer:BufferedWriter = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream,"Cp1252"))
+    val reader:BufferedReader = new BufferedReader(new InputStreamReader(socket.getInputStream))
 
     // Log on to the server.
     System.out.println("Trying to authenticate")
