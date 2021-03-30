@@ -69,7 +69,7 @@ class SparkRunner(
   // Redis TTL config
   val raw_stream_ttl:Int = 30
   val clean_stram_ttl:Int = 30
-  val wordcount_ttl:Int = 0
+  val wordcount_ttl:Int = 300
 
 
   def start(): Unit = {
@@ -99,6 +99,7 @@ class SparkRunner(
       println("SparkStreaming foreach iteration start")
 
       // Preprocess raw twitch IRC stream
+      /*
       val df = rdd
         .toDF()
         .withColumnRenamed("value", "message")
@@ -111,13 +112,36 @@ class SparkRunner(
         .withColumn("_tmp", split($"metadata", " "))
         .select(
           $"message",
-          $"_tmp".getItem(0).alias("user"),
+          $"_tmp".getItem(0).alias("timestamp"),
+          $"_tmp".getItem(1).alias("full_user"),
           $"_tmp".getItem(2).alias("channel"),
           $"text"
         )
+        .withColumn("user", split($"full_user", "!").getItem(0))
+
+       */
+
+      val df = rdd.toDF()
+          .withColumnRenamed("value", "message")
+          .withColumn("_tmp", split($"message", ":"))
+          .select(
+            $"message",
+            $"_tmp".getItem(0).alias("timestamp"),
+            $"_tmp".getItem(1).alias("metadata"),
+            $"_tmp".getItem(2).alias("text"),
+          )
+          .withColumn("_tmp", split($"metadata", " "))
+          .select(
+            $"message",
+            $"metadata",
+            $"timestamp",
+            split($"_tmp".getItem(0), "!").getItem(0).alias("user"),
+            $"_tmp".getItem(2).alias("channel"),
+            lower($"text").alias("text")
+          )
 
       df.createOrReplaceTempView("words")
-      // write(df, table = "raw", ttl = raw_stream_ttl , mode = SaveMode.Append)
+      write(df, table = "raw", ttl = raw_stream_ttl , mode = SaveMode.Append)
 
       // Fit-Transform using SParkNLP pipeline
       val clean_df = cleaningPipeline.fit(df).transform(df)
@@ -180,7 +204,7 @@ class SparkRunner(
               $"prev_wordcount_count",
               $"new_sum".alias("count")
             )
-        summed_counts.sort($"count".desc).show()
+        // summed_counts.sort($"count".desc).show()
 
         // Write new words to Redis, using TTL to clean old words
         summed_counts
@@ -212,7 +236,7 @@ class SparkRunner(
       .agg(count("sentiment").alias("sentiment_count"))
   }
 
-  def write(df: DataFrame, table: String, ttl: String = "300", mode: SaveMode = SaveMode.Append): Unit = {
+  def write(df: DataFrame, table: String, ttl: Int = 300, mode: SaveMode = SaveMode.Append): Unit = {
     df
       .write
       .format("org.apache.spark.sql.redis")
