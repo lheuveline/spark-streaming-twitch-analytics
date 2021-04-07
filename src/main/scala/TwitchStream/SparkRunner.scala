@@ -6,6 +6,7 @@ import com.johnsnowlabs.nlp.{DocumentAssembler, Finisher, SparkNLP}
 import org.apache.spark._
 import org.apache.spark.ml.{Pipeline, PipelineModel}
 import org.apache.spark.sql._
+import org.apache.spark.sql.catalyst.ScalaReflection.Schema
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.streaming._
@@ -25,7 +26,7 @@ class SparkRunner(
 
   // Init SparkNLP Pipeline
   val spark = SparkSession.builder()
-    .appName("TwitchStream")
+    .appName(s"TwitchStream_$TwitchChannel")
     .master("local[*]")
     .config("spark.driver.memory","16G")
     .config("spark.driver.maxResultSize", "0")
@@ -67,10 +68,12 @@ class SparkRunner(
   ))
 
   // Redis TTL config
-  val raw_stream_ttl:Int = 30
-  val clean_stram_ttl:Int = 30
-  val wordcount_ttl:Int = 300
+  val raw_stream_ttl:Int = 0
+  val clean_stream_ttl:Int = 0
+  val wordcount_ttl:Int = 0
 
+  // WordCount config
+  val limit:Int = 10000
 
   def start(): Unit = {
 
@@ -96,31 +99,7 @@ class SparkRunner(
     // Run Streaming Operations
     customReceiverStream foreachRDD { rdd =>
 
-      println("SparkStreaming foreach iteration start")
-
       // Preprocess raw twitch IRC stream
-      /*
-      val df = rdd
-        .toDF()
-        .withColumnRenamed("value", "message")
-        .withColumn("_tmp", split($"message", ":")) // split only once if msg contains ":"
-        .select(
-          $"message",
-          $"_tmp".getItem(1).alias("metadata"),
-          $"_tmp".getItem(2).alias("text")
-        )
-        .withColumn("_tmp", split($"metadata", " "))
-        .select(
-          $"message",
-          $"_tmp".getItem(0).alias("timestamp"),
-          $"_tmp".getItem(1).alias("full_user"),
-          $"_tmp".getItem(2).alias("channel"),
-          $"text"
-        )
-        .withColumn("user", split($"full_user", "!").getItem(0))
-
-       */
-
       val df = rdd.toDF()
           .withColumnRenamed("value", "message")
           .withColumn("_tmp", split($"message", ":"))
@@ -141,84 +120,73 @@ class SparkRunner(
           )
 
       df.createOrReplaceTempView("words")
-      write(df, table = "raw", ttl = raw_stream_ttl , mode = SaveMode.Append)
+      write(df, table = s"$TwitchChannel" + "_raw", ttl = raw_stream_ttl , mode = SaveMode.Append)
 
-      // Fit-Transform using SParkNLP pipeline
+      println("Cleaning data using SparkNLP pipeline...")
+
+      // Fit-Transform using SparkNLP pipeline
       val clean_df = cleaningPipeline.fit(df).transform(df)
-      // write(clean_df, table = "cleaned_stream", ttl = clean_stream_ttl , mode = SaveMode.Append)
 
+      // If any results, process
       if (clean_df.count() > 0) {
 
-        // Get current wordcount
-        val wordcount = clean_df
-          .select(explode($"finished_clean_text").alias("words"))
-          .select("words")
-          .filter(length($"words") > 2)
-          .groupBy($"words")
-          .count()
-          .sort($"count".desc)
-          .limit(10)
+        println("Writing clean stream...")
+
+        // Write cleaned stream to Redis
+        write(clean_df, table = s"$TwitchChannel" + "_cleaned_stream", ttl = clean_stream_ttl , mode = SaveMode.Append)
+
+        // Get sentiment counts and update from previous results in Redis
+        println("Updating sentiment count...")
+        val sentiment_counts = clean_df.transform(sentimentCount)
+        val sentiment_counts_schema = StructType(Array(
+          StructField("finished_sentiment", StringType),
+          StructField("sentiment_count", IntegerType)
+        ))
+        val prev_sentiment_counts = get_table(
+          s"$TwitchChannel" + "_sentiment_counts",
+          sentiment_counts_schema,
+          "finished_sentiment"
+        )
+        val new_sentiment_counts = update_table(
+          prev_sentiment_counts,
+          sentiment_counts,
+          "finished_sentiment",
+          "sentiment_count"
+        )
+        write(
+          new_sentiment_counts,
+          table = s"$TwitchChannel" + "_sentiment_counts",
+          ttl = wordcount_ttl ,
+          mode = SaveMode.Overwrite,
+          keyColumn = "finished_sentiment"
+        )
+
+        // Get current wordcount and update previous results in Redis
+        print("Updating wordcount...")
+        val wordcount = clean_df.transform(getWordcount)
         wordcount.createOrReplaceTempView("wordcount")
-
-        // Get previous wordcount from Redis - Could be kept in memory instead of make new request
-        val prev_wordcount = scala.util.Try({
-          spark.read
-            .format("org.apache.spark.sql.redis")
-            .option("table", "wordcount")
-            .option("key.column", "words")
-            .schema(StructType(Array(
-              StructField("words", StringType),
-              StructField("count", FloatType)
-            )))
-            .load()
-        }).getOrElse({
-          spark.emptyDataFrame
-        })
-        prev_wordcount.createOrReplaceTempView("prev_wordcount")
-
-        val new_wordcount = spark.sql(
-          """
-            |SELECT
-            | wordcount.words AS wordcount_words,
-            | wordcount.count AS wordcount_count,
-            | prev_wordcount.words AS prev_wordcount_words,
-            | prev_wordcount.count AS prev_wordcount_count
-            |FROM wordcount
-            |FULL OUTER JOIN prev_wordcount
-            |ON wordcount.words = prev_wordcount.words
-            |""".stripMargin).na.fill(0)
-            .withColumn(
-              "all_words",
-              when($"wordcount_words".isNull, $"prev_wordcount_words").otherwise($"wordcount_words")
-            )
-            .select($"all_words".alias("words"), $"wordcount_count", $"prev_wordcount_count")
-
-        val sum_counts: (Int, Int) => Int = (x:Int, y:Int) => x + y
-        val sum_udf = udf(sum_counts)
-
-        val summed_counts = new_wordcount
-            .withColumn("new_sum", sum_udf($"wordcount_count", $"prev_wordcount_count"))
-            .select(
-              $"words",
-              $"wordcount_count",
-              $"prev_wordcount_count",
-              $"new_sum".alias("count")
-            )
-        // summed_counts.sort($"count".desc).show()
-
-        // Write new words to Redis, using TTL to clean old words
-        summed_counts
-          .write
-          .format("org.apache.spark.sql.redis")
-          .option("table", "wordcount")
-          .option("ttl", wordcount_ttl)
-          .option("key.column", "words")
-          .option("scan.count", "1000")
-          .option("stream.parallelism", 4)
-          .mode(SaveMode.Append)
-          .save()
-
-        println("SparkStreaming foreach iteration end")
+        val wordcount_schema = StructType(Array(
+          StructField("words", StringType),
+          StructField("count", FloatType)
+        ))
+        val prev_wordcount = get_table(
+          s"$TwitchChannel" + "_wordcount",
+          wordcount_schema,
+          "words"
+        )
+        val summed_counts = update_table(
+          prev_wordcount,
+          wordcount,
+          "words",
+          "count"
+        )
+        write(
+          summed_counts,
+          table = s"$TwitchChannel" + "_wordcount",
+          ttl = wordcount_ttl ,
+          mode = SaveMode.Append,
+          keyColumn = "words"
+        )
 
       }
       else {
@@ -230,20 +198,101 @@ class SparkRunner(
   }
 
   def sentimentCount(df: DataFrame): DataFrame = {
+    /* Notes
+    - Explode not averaging message.
+     */
     df
-      .withColumn("sentiment", when(rand() > 0.5, 1).otherwise(0))
-      .groupBy("sentiment")
-      .agg(count("sentiment").alias("sentiment_count"))
+      .select(explode($"finished_sentiment").alias("finished_sentiment"))
+      .groupBy("finished_sentiment")
+      .agg(count("finished_sentiment").alias("sentiment_count"))
+      .na.fill("None")
   }
 
-  def write(df: DataFrame, table: String, ttl: Int = 300, mode: SaveMode = SaveMode.Append): Unit = {
+  def getWordcount(df:DataFrame): DataFrame = {
     df
+      .select(explode(col("finished_clean_text")).alias("words"))
+      .select("words")
+      .filter(length($"words") > 2)
+      .groupBy($"words")
+      .count()
+      .sort($"count".desc)
+      .limit(10000)
+  }
+
+  def write(df: DataFrame, table: String, ttl: Int = 300,
+             mode: SaveMode = SaveMode.Append, keyColumn:String = null
+           ): Unit = {
+
+    if (keyColumn != null) {
+      df
+        .write
+        .format("org.apache.spark.sql.redis")
+        .option("table", table)
+        .option("key.column", keyColumn)
+        .option("ttl", ttl)
+        .mode(mode)
+        .save()
+    } else {
+      df
+        .write
+        .format("org.apache.spark.sql.redis")
+        .option("table", table)
+        .option("ttl", ttl)
+        .mode(mode)
+        .save()
+    }
+
+  }
+
+  def write_to_file(df:DataFrame): Unit = {
+    df
+      .coalesce(1)
       .write
-      .format("org.apache.spark.sql.redis")
-      .option("table", table)
-      .option("ttl", ttl)
-      .mode(mode)
-      .save()
+      .format("csv")
+      .mode(saveMode = SaveMode.Append)
+      .save("/home/neadex/scala/twitch_streaming_extract.csv")
+  }
+
+  def get_table(tableName:String, schema:StructType, keyColumn:String = null): DataFrame = {
+
+    val df = if (keyColumn != null) {
+      scala.util.Try({
+        spark.read
+          .format("org.apache.spark.sql.redis")
+          .option("table", tableName)
+          .option("key.column", keyColumn)
+          .schema(schema)
+          .load()
+      }).getOrElse({
+        spark.createDataFrame(spark.sparkContext.emptyRDD[Row], schema)
+      })
+    } else {
+      scala.util.Try({
+        spark.read
+          .format("org.apache.spark.sql.redis")
+          .option("table", tableName)
+          .schema(schema)
+          .load()
+      }).getOrElse({
+        spark.createDataFrame(spark.sparkContext.emptyRDD[Row], schema)
+      })
+    }
+    return df
+
+  }
+
+  def update_table(df1:DataFrame, df2:DataFrame, joinKey:String, sumKey:String): DataFrame = {
+
+    val new_df = df1
+        .join(
+          df2.withColumnRenamed(sumKey, "t+1"), Seq(joinKey),
+          "full_outer"
+        ).na.fill(0)
+      .withColumnRenamed(sumKey, "old_sumkey")
+      .withColumn(sumKey, (col("old_sumkey") + col("t+1")))
+      .drop("old_sumkey", "t+1")
+
+    return new_df
   }
 
 }

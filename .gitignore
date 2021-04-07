@@ -3,3 +3,4 @@ spark-warehouse/
 .bsp/
 null/
 target/
+log/
