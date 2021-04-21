@@ -1,12 +1,7 @@
 package TwitchStream
 
-import com.johnsnowlabs.nlp.annotators._
-import com.johnsnowlabs.nlp.pretrained.PretrainedPipeline
-import com.johnsnowlabs.nlp.{DocumentAssembler, Finisher, SparkNLP}
 import org.apache.spark._
-import org.apache.spark.ml.{Pipeline, PipelineModel}
 import org.apache.spark.sql._
-import org.apache.spark.sql.catalyst.ScalaReflection.Schema
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.streaming._
@@ -41,38 +36,15 @@ class SparkRunner(
   val sc:SparkContext = spark.sparkContext
   val ssc:StreamingContext = new StreamingContext(sc, Seconds(BatchDuration))
 
-  val sentimentAnnotator:PipelineModel = PretrainedPipeline("analyze_sentiment", lang= "en").model // Only english model available
+  val cleaningPipeline = pipelines.getSentimentPipeline()
 
-  val documentAssembler:DocumentAssembler = new DocumentAssembler()
-    .setInputCol("text")
-    .setOutputCol("document")
-
-  val tokenizer:Tokenizer = new Tokenizer()
-    .setInputCols("document")
-    .setOutputCol("token")
-
-  // Stopwords model : ! language hardcoded !
-  val stopWordsCleaner:StopWordsCleaner = StopWordsCleaner.pretrained("stopwords_fr", lang = "fr")
-    .setInputCols("token")
-    .setOutputCol("clean_text")
-
-  val finisher:Finisher = new Finisher()
-    .setInputCols("clean_text", "sentiment")
-
-  val cleaningPipeline:Pipeline = new Pipeline().setStages(Array(
-    documentAssembler,
-    tokenizer,
-    stopWordsCleaner,
-    sentimentAnnotator,
-    finisher
-  ))
-
-  // Redis TTL config
+  // Redis TTL config, 0 = no ttl
   val raw_stream_ttl:Int = 0
   val clean_stream_ttl:Int = 0
   val wordcount_ttl:Int = 0
+  val categoryCountTtl:Int = 0
 
-  // WordCount config
+  // WordCount max N words config
   val limit:Int = 10000
 
   def start(): Unit = {
@@ -137,56 +109,57 @@ class SparkRunner(
 
         // Get sentiment counts and update from previous results in Redis
         println("Updating sentiment count...")
-        val sentiment_counts = clean_df.transform(sentimentCount)
+        val sentiment_counts = clean_df.transform(transform.sentimentCount)
+
         val sentiment_counts_schema = StructType(Array(
           StructField("finished_sentiment", StringType),
           StructField("sentiment_count", IntegerType)
         ))
-        val prev_sentiment_counts = get_table(
-          s"$TwitchChannel" + "_sentiment_counts",
-          sentiment_counts_schema,
-          "finished_sentiment"
-        )
-        val new_sentiment_counts = update_table(
-          prev_sentiment_counts,
-          sentiment_counts,
-          "finished_sentiment",
-          "sentiment_count"
-        )
-        write(
-          new_sentiment_counts,
-          table = s"$TwitchChannel" + "_sentiment_counts",
-          ttl = wordcount_ttl ,
-          mode = SaveMode.Overwrite,
-          keyColumn = "finished_sentiment"
-        )
+
+        val prev_sentiment_counts = get_table(s"$TwitchChannel" + "_sentiment_counts",
+          sentiment_counts_schema, "finished_sentiment")
+
+        val new_sentiment_counts = update_table(prev_sentiment_counts, sentiment_counts, "finished_sentiment",
+          "sentiment_count")
+        write(new_sentiment_counts, table = s"$TwitchChannel" + "_sentiment_counts", ttl = wordcount_ttl,
+          mode = SaveMode.Overwrite, keyColumn = "finished_sentiment")
 
         // Get current wordcount and update previous results in Redis
         print("Updating wordcount...")
-        val wordcount = clean_df.transform(getWordcount)
+        val wordcount = clean_df.transform(transform.getWordcount)
         wordcount.createOrReplaceTempView("wordcount")
         val wordcount_schema = StructType(Array(
           StructField("words", StringType),
           StructField("count", FloatType)
         ))
-        val prev_wordcount = get_table(
-          s"$TwitchChannel" + "_wordcount",
-          wordcount_schema,
-          "words"
-        )
-        val summed_counts = update_table(
-          prev_wordcount,
-          wordcount,
-          "words",
-          "count"
-        )
-        write(
-          summed_counts,
-          table = s"$TwitchChannel" + "_wordcount",
-          ttl = wordcount_ttl ,
-          mode = SaveMode.Append,
-          keyColumn = "words"
-        )
+
+        val prev_wordcount = get_table(s"$TwitchChannel" + "_wordcount",
+          wordcount_schema, "words")
+
+        val summed_counts = update_table(prev_wordcount, wordcount, "words", "count")
+        write(summed_counts, table = s"$TwitchChannel" + "_wordcount", ttl = wordcount_ttl ,
+          mode = SaveMode.Append, keyColumn = "words")
+
+        val category = clean_df.transform(transform.getCategory)
+
+        // Should be integrated into TwitchStream.transform as other function "categoryCount"
+        val categoryCount = category
+          .select(explode($"category").alias("category"))
+          .groupBy("category")
+          .count()
+
+        val categoryCountSchema = StructType(Array(
+          StructField("category", StringType),
+          StructField("count", FloatType)
+        ))
+        val prevCategoryCount = get_table(s"$TwitchChannel" + "_categoryCount",
+          categoryCountSchema, "category")
+        val summedCategoryCounts = update_table(prevCategoryCount, categoryCount, "category", "count")
+
+        summedCategoryCounts.show()
+
+        write(summedCategoryCounts, table = s"$TwitchChannel" + "_categoryCount", ttl = categoryCountTtl ,
+          mode = SaveMode.Append, keyColumn = "category")
 
       }
       else {
@@ -195,28 +168,6 @@ class SparkRunner(
     }
     ssc.start()
     ssc.awaitTermination()
-  }
-
-  def sentimentCount(df: DataFrame): DataFrame = {
-    /* Notes
-    - Explode not averaging message.
-     */
-    df
-      .select(explode($"finished_sentiment").alias("finished_sentiment"))
-      .groupBy("finished_sentiment")
-      .agg(count("finished_sentiment").alias("sentiment_count"))
-      .na.fill("None")
-  }
-
-  def getWordcount(df:DataFrame): DataFrame = {
-    df
-      .select(explode(col("finished_clean_text")).alias("words"))
-      .select("words")
-      .filter(length($"words") > 2)
-      .groupBy($"words")
-      .count()
-      .sort($"count".desc)
-      .limit(10000)
   }
 
   def write(df: DataFrame, table: String, ttl: Int = 300,
@@ -241,16 +192,6 @@ class SparkRunner(
         .mode(mode)
         .save()
     }
-
-  }
-
-  def write_to_file(df:DataFrame): Unit = {
-    df
-      .coalesce(1)
-      .write
-      .format("csv")
-      .mode(saveMode = SaveMode.Append)
-      .save("/home/neadex/scala/twitch_streaming_extract.csv")
   }
 
   def get_table(tableName:String, schema:StructType, keyColumn:String = null): DataFrame = {

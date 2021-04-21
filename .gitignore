@@ -4,3 +4,5 @@ spark-warehouse/
 null/
 target/
 log/
+
+src/main/scala/TwitchStream/models/

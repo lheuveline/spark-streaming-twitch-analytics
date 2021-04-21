@@ -45,7 +45,6 @@ class IRCBot(val channel: String, val nick: String, val pass:String)
 
     Stream.continually(reader.readLine()).takeWhile(_ != null) foreach { line =>
       if (line.contains("PING ")) {
-        println("I got pinged !")
         writer.write("PONG " + line.substring(5) + "\r\n")
         writer.flush()
       }
