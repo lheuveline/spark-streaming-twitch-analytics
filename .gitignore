@@ -6,3 +6,4 @@ target/
 log/
 
 src/main/scala/TwitchStream/models/
+*.sc

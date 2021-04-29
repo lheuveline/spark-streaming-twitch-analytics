@@ -1,6 +1,6 @@
 package TwitchStream
 
-import org.apache.spark.sql.{Column, DataFrame}
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions._
 
 object transform {
@@ -38,10 +38,9 @@ object transform {
     df
       .select(explode(col("finished_clean_text")).alias("words"))
       .select("words")
-      .filter(length(col("words")) > 2)
+      .filter(length(col("words")) > 3)
       .groupBy(col("words"))
       .count()
-      .sort(col("count").desc)
-      .limit(10000)
+      .filter(col("count") > 5)
   }
 }

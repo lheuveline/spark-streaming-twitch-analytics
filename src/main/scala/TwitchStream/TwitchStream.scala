@@ -25,7 +25,7 @@ object TwitchStream extends App {
    */
 
   val channel = args(0)
-  val batchDuration = args(1).toInt
+  val batchDuration = args(1).toLong
   val language = args(2)
   val twitch_nick = args(3)
   val twitch_oauth = args(4)
