@@ -5,7 +5,6 @@ import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.streaming._
-import org.apache.spark.streaming.dstream.DStream
 
 import scala.collection.mutable
 
@@ -45,7 +44,7 @@ class SparkRunner(TwitchChannel: String, BatchDuration: Long, language: String =
   val customReceiverStream = ssc.receiverStream(new IRCBot(TwitchChannel, twitch_nick, twitch_oauth))
 
   // For stream states
-  ssc.checkpoint("/tmp")
+  ssc.checkpoint("file:///tmp")
 
   val redisInterface = new RedisInterface(spark)
 

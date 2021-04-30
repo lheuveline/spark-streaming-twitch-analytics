@@ -8,4 +8,7 @@ Spark Streaming Twitch Analytics
 	- Output to Redis for further analysis or viz ([WIP] Dash repo to display live results)
 	
 * Usage :
-    - ``sbt run [channelName] [batchDuration] [language] [twitch_nickname] [twitch_oauth_token]``
+	* Build :
+            - ``sbt run [channelName] [batchDuration] [language] [twitch_nickname] [twitch_oauth_token]``
+        * Submitting application in local mode :
+            - ```spark-submit --master "local[*]" --deploy-mode client target/scala-2.12/Twitch-assembly-0.1.jar [TWITCH_CHANNEL] [BATCH_INTERVAL] [LANGUAGE] [TWITCH_USERNAME] [TWITCH_OAUTH]```
